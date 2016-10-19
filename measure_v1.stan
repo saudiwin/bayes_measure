@@ -1,0 +1,147 @@
+functions {
+  //Define an ROC function to handle prediction of success/failure in a Bayesian context
+  //The ROC is a posterior-predictive test quantity and reflects uncertainty in the posterior
+  //In other words, it is an ROC curve with a confidence interval
+  //Inputs are predicted probabilities (pred_success), the actual observed data (obs_success), the number of observations,
+  // and the number of thresholds to consider in the [0,1] interval
+  
+  matrix roc_curve(vector pred_success, vector obs_success, int num_obs, int threshold_num,vector quantiles) {
+    
+    //need matrix to hold false positive and true positive rates
+  
+    matrix[threshold_num+1,2] tpr_fpr_rates;
+    real num_pos;
+    real num_neg;
+    
+    num_pos = sum(obs_success);
+    num_neg = num_elements(obs_success) - sum(obs_success);
+    
+    //Loop over thresholds to form ROC curve
+    
+    for(i in 1:(threshold_num+1)) {
+      
+      real q;
+      
+      vector[num_obs] fpr;
+      vector[num_obs] tpr;
+      
+      q = quantiles[i];
+      
+      for(n in 1:num_obs) {
+        if(pred_success[n]>q && obs_success[n]==1) {
+          tpr[n] = 1;
+          fpr[n] = 0;
+        } else if (pred_success[n]>q && obs_success[n]==0) {
+          tpr[n] = 0;
+          fpr[n] = 1;
+        } else {
+          tpr[n] = 0;
+          fpr[n] = 0;
+        }
+      
+      tpr_fpr_rates[i,1] = sum(tpr) / num_pos;
+      tpr_fpr_rates[i,2] = sum(fpr) / num_neg;
+        
+        
+      }
+      
+    }
+    
+    return tpr_fpr_rates;
+    
+  }
+  
+}
+
+
+data {
+  
+  //N = num obs
+  
+  int<lower=0> N;
+  
+  //J= num algorithms
+  
+  int<lower=0> J;
+  
+  //x = matrix of predicted algorithmic probabilities
+  
+  matrix[N,J] x;
+  
+  //y = vector of observed purchase/non-purchase
+  
+  int y[N];
+  
+  //number of points in [0,1] to evaluate ROC function
+  int threshold_num;
+  
+  //same # but for calculation purposes
+  real thresh_real;
+  
+}
+
+transformed data {
+  vector[threshold_num+1] quantiles;
+  vector[N] obs_success;
+  real step_size;
+  
+  //integer array to vector conversion for ROC function
+  
+  for(n in 1:N) {  
+    obs_success[n] = y[n];
+  }
+  
+  //generate quantiles for ROC curve
+  // zero always equals zero for an ROC curve at the origin
+  
+  quantiles[1] = 0;
+  step_size = 1 / thresh_real;
+  for(r in 1:threshold_num) {
+    quantiles[r+1] = quantiles[r] + step_size;
+  }
+}
+
+parameters {
+  
+  // Estimate a single parameter for each algorithm indexed by J
+  // Will permit us to discriminate between algorithms
+  // Higher coefficients should indicate better models. 
+  // Lower standard errors also equal better-performing models
+  // Per Carpenter (2015), the centered parameterization is more efficient given large data,
+  // While a non-centered parameterization would be optimal for small data 
+  // See http://mc-stan.org/documentation/case-studies/pool-binary-trials.html
+  
+  vector[J] theta;
+  real mu;
+  real<lower=0> tau;
+  real alpha;
+}
+model {
+  
+  y ~ bernoulli_logit(alpha + x*theta);
+  
+  //Relatively vague priors
+  //We assume that the thetas come from a common distribution as they all should be 
+  //measuring the same thing
+  
+  theta ~ normal(mu,tau);
+    mu ~ normal(0,10);
+    tau ~ cauchy(0,5);
+    alpha ~ normal(0,10);
+}
+
+
+generated quantities {
+    vector[N] theta_prob;  // chance of success converted from logit scale
+    int pred_success[N]; // Sample from binomial distribution regarding whether the customer bought the product or not
+    matrix[threshold_num+1,2] roc_graph;
+
+    
+  for (n in 1:N) {
+    theta_prob[n] = inv_logit(alpha + x[n,]*theta);
+    pred_success[n] = bernoulli_rng(theta_prob[n]);
+  }
+  
+  roc_graph = roc_curve(theta_prob,obs_success,N,threshold_num,quantiles);
+    
+}
