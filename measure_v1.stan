@@ -111,23 +111,43 @@ parameters {
   // While a non-centered parameterization would be optimal for small data 
   // See http://mc-stan.org/documentation/case-studies/pool-binary-trials.html
   
-  vector[J] theta;
+  // To reduce correlation between the lower-level and upper-level parameters, we are using a 
+  // 'non-centered parameterization'. It just means that the predictor variables are standardized
+  // relative to the population-level variance to reduce correlation in the posterior
+  
+  
+  vector[J] theta_raw;
   real mu;
   real<lower=0> tau;
   real alpha;
 }
-model {
+
+transformed parameters {
   
-  y ~ bernoulli_logit(alpha + x*theta);
+  vector[J] theta;
+  //this equation defines the relationship between the model coefficients and the higher-level (population)
+  //parameters in a non-centered method
+  theta = mu + tau*theta_raw;
+}
+
+model {
   
   //Relatively vague priors
   //We assume that the thetas come from a common distribution as they all should be 
   //measuring the same thing
+    
+  //On the inverse logit scale, this hyperprior on mu covers the full probability range [0,1]
+    mu ~ normal(0,5);
+  //tau variance (common-wisdom) prior covers a wide variance on the logit scale
+    tau ~ normal(0,5);
+  //theta receives a standard unit normal prior to decouple the upper-level from lower-level parameters (non-centered
+  theta_raw ~ normal(0,1);
+  //intercept can take any vague prior
+    alpha ~ normal(0,5);
   
-  theta ~ normal(mu,tau);
-    mu ~ normal(0,10);
-    tau ~ cauchy(0,5);
-    alpha ~ normal(0,10);
+  //Model sampling statement -- bernoulli model with logit link function (equivalent to GLM with logit link)
+  
+  y ~ bernoulli_logit(alpha + x*theta);  
 }
 
 
