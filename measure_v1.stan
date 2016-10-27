@@ -78,6 +78,10 @@ data {
   //same # but for calculation purposes
   real thresh_real;
   
+  //whether model is hierachical (necessaray for loo calculation)
+  
+  int hier;
+  
 }
 
 transformed data {
