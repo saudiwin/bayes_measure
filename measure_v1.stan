@@ -124,10 +124,10 @@ parameters {
 
 transformed parameters {
   
-  vector[J] theta;
+  //vector[J] theta;
   //this equation defines the relationship between the model coefficients and the higher-level (population)
   //parameters in a non-centered method
-  theta = mu + tau*theta_raw;
+  //theta = mu + tau*theta_raw;
 }
 
 model {
@@ -140,28 +140,51 @@ model {
     mu ~ normal(0,5);
   //tau variance (common-wisdom) prior covers a wide variance on the logit scale
     tau ~ normal(0,5);
-  //theta receives a standard unit normal prior to decouple the upper-level from lower-level parameters (non-centered
-  theta_raw ~ normal(0,1);
+  //if non-centered, theta receives a standard unit normal prior to decouple the upper-level from lower-level parameters (non-centered
+  
+  theta_raw ~ normal(mu,tau);
   //intercept can take any vague prior
     alpha ~ normal(0,5);
   
   //Model sampling statement -- bernoulli model with logit link function (equivalent to GLM with logit link)
   
-  y ~ bernoulli_logit(alpha + x*theta);  
+  y ~ bernoulli_logit(alpha + x*theta_raw);  
 }
 
 
 generated quantities {
+  /*
     vector[N] theta_prob;  // chance of success converted from logit scale
     int pred_success[N]; // Sample from binomial distribution regarding whether the customer bought the product or not
     matrix[threshold_num+1,2] roc_graph;
 
-    
   for (n in 1:N) {
     theta_prob[n] = inv_logit(alpha + x[n,]*theta);
     pred_success[n] = bernoulli_rng(theta_prob[n]);
   }
   
   roc_graph = roc_curve(theta_prob,obs_success,N,threshold_num,quantiles);
+  */
+  
+  // Create log-likelihood for use with loo
+  // First pull from hyperprior, then generate bernoulli log density
+  
+  vector[N] log_lik;
+  vector[J] theta_rep;
+  
+  if(hier==1) {
+  
+  for(n in 1:N) {
+    for(j in 1:j) {
+      //Need to include uncertainty over the hyperprior on theta
+      theta_rep[j] = normal_rng(mu,tau);
+    }
+    log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + x[n]*theta_rep);
+  }
+  else {
+    for(n in 1:N) {
+    log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + x[n]*theta);
+    }
+  }
     
 }
