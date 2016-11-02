@@ -172,23 +172,24 @@ generated quantities {
   
   // Create log-likelihood for use with loo
   // First pull from hyperprior, then generate bernoulli log density
-  
+  //even this is too big to run in Rstan with any efficiency
+  //need to save model estimates and predictions separately
+  /*
   vector[N] log_lik;
   vector[J] theta_rep;
   
   if(hier==1) {
-  
-  for(n in 1:N) {
-    for(j in 1:j) {
+  for(j in 1:J) {
       //Need to include uncertainty over the hyperprior on theta
       theta_rep[j] = normal_rng(mu,tau);
-    }
+  }
+  for(n in 1:N) {
     log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + x[n]*theta_rep);
-  }
-  else {
+  } 
+  } else {
     for(n in 1:N) {
-    log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + x[n]*theta);
+    log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + x[n]*theta_raw);
     }
-  }
+  } */ 
     
 }

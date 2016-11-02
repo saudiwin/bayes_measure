@@ -10,6 +10,7 @@ require(shinystan)
 require(ggplot2)
 require(plotly)
 require(archivist)
+require(loo)
 
 # Data directory for archivist R model collection
 
@@ -66,3 +67,25 @@ time2 <- Sys.time()
 total_time <- difftime(time2,time1)
 print(total_time)
 
+# Check loo for hierarchical model
+# Loop over all bayes_model functions that match certain tags in archivist
+
+to_loop <- 
+
+loo1 <- get_log_lik(stan_sample=bayes_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800)
+
+# it seems that some of the observations are very very unlikely -- i.e., the model is almost certainly wrong
+
+
+improbable <- which(-0.5>loo1[,8])
+loo_check1 <- loo(loo1[-improbable,])
+
+loo_data <- loo1 %>% as_data_frame
+names(loo_data) <- paste0('Iter',1:length(loo_data))
+loo_data <- mutate(loo_data,observation=paste0('Obs_',row_number()))
+loo_data <- sample_n(loo_data,100)
+loo_data <- gather(loo_data,iteration,log_density,-observation)
+
+loo_data %>% mutate(log_density=exp(log_density)) %>% 
+  ggplot(aes(y=log_density,x=observation)) + stat_smooth() + 
+  theme_minimal()
