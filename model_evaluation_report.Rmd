@@ -1,0 +1,136 @@
+---
+title: "Consumer Purchase Model Evaluation Report"
+author: "Robert Kubinec"
+date: "November 2, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(dplyr)
+require(tidyr)
+require(magrittr)
+require(rstan)
+require(shinystan)
+require(ggplot2)
+require(plotly)
+require(archivist)
+require(loo)
+
+source('model_func.R')
+```
+
+### Load Data & Models
+
+Data is loaded via R/data.table package and all the algorithms are included as predictors.
+
+```{r echo=TRUE,results='hide'}
+algo_data <- data.table::fread('data/all_combine_200k.csv') %>% as_data_frame
+
+outcome <- algo_data$realpurch
+
+# Standardize algorithmic output to the same scale
+
+algos <- select(algo_data,algo1,algo2,algo3,algo4,algo5) %>% mutate_all(scale) 
+
+```
+
+Each estimated model is stored in a local archive via R package archivist. This model is the full hierarchical Bayes model estimated with Stan. It was run for 800 iterations, the first 400 of which are considered warmup and should not be used for analysis. The remaining 400 iterations are considered to be quasi-independent estimates of the full posterior. For that reason, they can be used for the calculation of any kind of statistics of the posterior, and quantiles of the estimates indicate uncertainty (i.e., 5%, 10%, 50%, etc.). This model has been tested for convergence and has passed with flying colors. 
+
+Most of the statistics used for evaluation can be calculated from the iterations of the parameters of interest from this base model. Given the size of the outcome variable, it is better to load these parameter estimates from the model, and then calculate any statistics within R which is better able to handle big data than the Stan estimation program.
+
+There are two important predictors within the model -- alpha, which is the intercept, and theta_raw, which are the parameters of the five algorithms. These coefficients are on the logit scale.
+
+```{r echo=TRUE,results='hide'}
+
+
+base_model <- loadFromLocalRepo('41e3e006ed220f3601f71585b19fdab6',repoDir='data/',value=TRUE)
+
+```
+
+### Calculate Binary Log-loss function
+
+The model evaluation metric I decided to use is a logarithmic function of the distance between the predicted probability of the hierarchical logit model and the observed outcome (1 if customer purchased and 0 if customer did not purchase). This metric has a few useful features: 
+
+1. It can be calculated at the observation-level, allowing me to compare different observations
+2. It weights negative and positive outcomes the same, so it constitutes a valid metric of model performance as a whole.
+
+The log-loss function is easy to calculate. If the outcome is zero, the log-loss metric is equal to $\log \hat{y}$ and if the outcome is zero, the metric is equal to $\log (1-\hat{y})$ where $\hat{y}$ is the predicted probability. The function will penalize predictions that are far away from the observed outcome compared to predictions that are relatively close to the observed outcome.
+
+I calculate this log-loss for each observation in the dataset and for each iteration of the model. That produces a dataframe with 400 columns of 200k rows. Mean (SD) log-loss for each iteration is the mean (SD) of each column of the dataset. Higher values of log-loss are associated with better predictions, while lower values of log-loss are associated with poorer predictions.
+
+```{r, echo=TRUE,results='hide'}
+# Note that this will take a minute or two
+all_logloss <- binary_log_loss(base_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800) %>% as_data_frame
+
+names(all_logloss) <- paste0("Iter_",401:800)
+all_logloss$obs_num <- paste0("Obs_",1:nrow(all_logloss))
+all_logloss <- all_logloss %>% gather(iter_number,logloss,-obs_num)
+
+```
+
+### Plot and Evaluate
+
+Once we have all of the logloss calculations for all observations and for all iterations of the model, we can begin to look at how logloss differs across observations and also across values of the parameters. Because we have the full posterior distribution, we can also include uncertainty in our estimates by using the quantiles of the distribution as confidence intervals.
+
+First, we collapse the dataset by observation and use only mean and SD of all model iterations for each iteration. This makes the data more manageable and easier to summarize.
+
+```{r,echo=TRUE}
+
+logloss_obs <- all_logloss %>% group_by(obs_num) %>% 
+  summarize(mean_loss = mean(logloss),low_ci=quantile(logloss,probs = 0.05),
+            high_ci=quantile(logloss,probs=0.95)) %>% ungroup 
+```
+
+Then we plot the mean value and 95% confidence region for each observation, ordering the observations in terms of the total log loss. This plot shows that the distribution of log loss is very non-linear. For the majority, approximately 90 percent, of the observations, the log loss is greater than 5, which means that on average the model missed the correct probability by less than 0.05. For a small minority of observations, seen at the far right-hand of the plot, log-loss approaches zero, signifying very poor predictions. A log-loss of zero indicates the model was almost completely wrong most of the time.
+
+```{r,echo=TRUE}
+logloss_obs %>% ggplot(aes(y=mean_loss,x=reorder(obs_num,-mean_loss),ymax=high_ci,ymin=low_ci)) + geom_pointrange(colour='grey50') +
+  xlab("Observations") + ylab("Log Loss Over True Outcome") + theme(axis.text.x=element_blank(),
+                   axis.ticks.x=element_blank())
+
+```
+
+A hierarchical model can be decomposed into different effects. Each predictor in the model has its own coefficient (the within-algorithm effect). All five algorithms are related through a distribution known as the hyperprior. The mean of this distribution is the overall mean of the algorithms and the standard deviation is the between-algorithm effect. A high SD implies that each algorithm is contributing a great deal separately, and there is little pooling of information between algorithms. A low SD implies that there is a high amount of pooling of information between algorithms. 
+
+We can obtain the between-algorithm effect by examining the coefficients from the model. 
+
+```{r}
+
+print(base_model)
+
+```
+
+In this list, theta_raw are each of the five algorithms, tau is the between effect, and mu is the overall mean. Tau has an average value of 1.85, and varies between 0.56 and 4.91. Because the algorithms were standardized, this means that on average each algorithm's coefficient is about 2 standard deviations from overall mean. This figure is relatively high and implies that there is a smaller amount of pooling in the model. 
+
+We can also look at pooling as it relates to logloss by plotting mean logloss for each iteration against the different values of tau for each iteration. The scatterplot shows that the relationship is not very strong, but has a maximum near the high posterior estimate for tau at 1.8. For lower values of tau, i.e., higher pooling, the log-loss function shows worse performance for the model. At higher values of tau, or less pooling, the model performs somewhat worse as tau increases.
+
+```{r, message=FALSE, warning=FALSE}
+tau <- extract(base_model,'tau')[[1]][401:800] %>% as_data_frame %>% 
+  mutate(iter_number=paste0('Iter_',401:800))
+logloss_iter <- all_logloss %>% group_by(iter_number) %>% summarize(mean_loss=mean(logloss)) %>% ungroup
+
+logloss_iter %>% left_join(tau) %>% ggplot(aes(y=mean_loss,x=value)) + geom_point() + ylab("Mean Logloss") +
+  xlab("Values of Tau (Between Effect)") + stat_smooth()+ theme_minimal()
+
+```
+
+However, rather than looking at mean values from the dataset, we can focus on the subset of observations that the model is predicting poorly. We can view the same plot except with the mean value of each iteration for the bottom 1 percent of observations in the dataset in terms of predictive accuracy. I will also output this file to CSV for later reference.
+
+```{r}
+bottom1percent <- filter(logloss_obs,mean_loss<percent_rank(1))
+write.csv(x = bottom1percent,file='data/bottom1percent.csv')
+bottom1percent %>% arrange(mean_loss)
+
+```
+
+And here is the plot comparing tau and mean log loss for this subset of observations:
+
+```{r, message=FALSE, warning=FALSE}
+filter(all_logloss,obs_num %in% bottom1percent$obs_num) %>% group_by(iter_number) %>% 
+  summarize(mean_loss=mean(logloss)) %>% left_join(tau) %>% ggplot(aes(y=mean_loss,x=value)) + geom_point() + ylab("Mean Logloss Bottom 1 Percent") +
+  xlab("Values of Tau (Between Effect)") + stat_smooth()+ theme_minimal()
+```
+
+Although the relationship is not very strong, the figure does show that for the bottom 1 percent of predictions, lower values of tau (i.e., more pooling) is associated with better predictions. Thus for the observations that the model does not predict well, pooling information from different algorithms improves performance. However, the improvement in performance is marginal and does not constitute a reason to change the underlying model.

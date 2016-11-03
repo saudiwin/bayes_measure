@@ -21,8 +21,8 @@ make_roc <- function(algo_num=NULL,outcome=NULL,threshold=10000) {
 get_log_lik <- function(stan_sample=NULL,outcome=NULL,algo_data=NULL,nwarmup=NULL,
                         niters=NULL) {
   
-  predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][nwarmup:niters,]
-  intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][nwarmup:niters]
+  predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
+  intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
   algo_data <- as.matrix(algo_data)
   
   raw_predict <- algo_data %*% t(predictors)
@@ -39,4 +39,33 @@ get_log_lik <- function(stan_sample=NULL,outcome=NULL,algo_data=NULL,nwarmup=NUL
                                  function(x) dbinom(x=outcome,size=1,prob=plogis(x),log=TRUE))]
   
   return(as.matrix(raw_predict))
+}
+
+binary_log_loss <- function(stan_sample=NULL,outcome=NULL,algo_data=NULL,nwarmup=NULL,
+                            niters=NULL) {
+  
+  predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
+  intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
+  algo_data <- as.matrix(algo_data)
+  
+  raw_predict <- algo_data %*% t(predictors)
+  rm(predictors)
+  raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t
+  # apply loop is too memory hungry
+  # switch to data.table to modify one column at a time in-place
+  raw_predict <- data.table::as.data.table(raw_predict)
+  
+  #calculate predicted probabilities per observation
+  raw_predict <- raw_predict[,lapply(.SD,plogis)]
+  
+  log_loss <- raw_predict[,lapply(.SD,function(x) {
+    output <- ifelse(outcome==0,-log(x),-log(1-x))
+    # Overflow zero prediction errors to 50
+    output[is.infinite(output)] <- 50
+    return(output)
+    }
+    )]
+  
+  return(log_loss)
+  
 }

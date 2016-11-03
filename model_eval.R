@@ -1,74 +1,55 @@
-# We can compute ranks of the different algorithms by drawing from the hyperparameters
-# In particular, we can examine how often algorithm 5, the highest-performing algorithm, has a higher prob. value
-# Than the combined model [any theta_j]
+
+require(dplyr)
+require(tidyr)
+require(magrittr)
+require(rstan)
+require(shinystan)
+require(ggplot2)
+require(plotly)
+require(archivist)
+require(loo)
 
 
-# Does this model really have an 80% positive prediction rate with no false positives? If so, that's pretty darn good
+algo_data <- data.table::fread('data/all_combine_200k.csv') %>% as_data_frame
 
-replicates <- extract(bayes_model,pars='pred_success')[[1]] %>% t %>% as_data_frame %>% sample(200)
-names(replicates) <- paste0('iter_',1:length(names(replicates)))
-replicates$obs_num <- paste0('Obs_',1:1000)
-replicates$original <- outcome
-replicates %<>% gather(iterates,iter_num,-obs_num,-original) %>% group_by(obs_num) %>% summarize(num_right=sum(iter_num==original),
-                                                                                                 num_wrong=sum(iter_num!=original)) 
+outcome <- algo_data$realpurch
 
-Sys.setenv("plotly_username" = "bobkubinec")
-Sys.setenv("plotly_api_key" = "8q00qm53km")
+# Standardize algorithmic output to the same scale
 
-# Output raw predictive performance
+algos <- select(algo_data,algo1,algo2,algo3,algo4,algo5) %>% mutate_all(scale) 
 
-output <- replicates %>% plot_ly(x=~obs_num) %>% add_markers(y=~num_right,color=I('red')) %>% layout(yaxis=list(title='Number Correct Predicted'),
-                                                                                                     xaxis=list(showgrid=F,title="Observed Outcomes (1 or 0)",
-                                                                                                                showticklabels=F))
-plotly_POST(output)
-
-# Look at ROC curve differences between models and algorithm 
+# Need to work on computing binary log loss so we can figure out which observations are problematic and why
 
 
-roc_curves <- extract(bayes_model,pars='roc_graph')[[1]]
-roc_curves <- apply(roc_curves,1,cbind) %>% t %>% as_data_frame
-names(roc_curves) <- c(paste0('TruePositive_',1:101),paste0('FalsePositive_',1:101))
-roc_curves <- roc_curves %>% mutate(iter=1:n())
-roc_curves <- gather(roc_curves,key = "typeofrate",value='Estimate',-iter) %>% separate(col = typeofrate,
-                                                                                        into=c('rate','num'),
-                                                                                        sep='\\_') %>% 
-  spread(key=rate,value=Estimate)
+base_model <- loadFromLocalRepo('41e3e006ed220f3601f71585b19fdab6',repoDir='data/',value=TRUE)
 
-# # Add in ROC curve from existing data (algorithms)
-# 
-make_roc <- function(algo_num=NULL,outcome=NULL,threshold=10000) {
-  algo <- algos[[algo_num]]
-  steps <- seq(from=0,to=1,length.out=threshold)
-  roc_data <- matrix(nrow=threshold,ncol=2)
-  num_pos <- sum(outcome)
-  num_neg <- length(outcome) - sum(outcome)
-  for(i in 1:threshold) {
-    tp <- (plogis(algo[outcome==1])>steps[i]) %>% sum
-    fp <- (plogis(algo[outcome==0])>steps[i]) %>% sum
-    roc_data[i,] <- c(tp/num_pos,fp/num_neg)
-  }
-  roc_data <- roc_data %>%  as_data_frame
-  roc_data$algo_type <- paste0("algo_",algo_num)
-  return(roc_data)
-}
+all_logloss <- binary_log_loss(base_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800) %>% as_data_frame
 
+names(all_logloss) <- paste0("Iter_",401:800)
+all_logloss$obs_num <- paste0("Obs_",1:nrow(all_logloss))
+all_logloss <- all_logloss %>% gather(iter_number,logloss,-obs_num)
 
-roc_out <-  lapply(1:length(algos),make_roc,outcome) %>% bind_rows
+# Collapse dataset down to mean and sd of logloss by each observation for plotting/summarization
 
-#Put labels where the lines are closest to 50% false positives
+logloss_obs <- all_logloss %>% group_by(obs_num) %>% 
+  summarize(mean_loss = mean(logloss),low_ci=quantile(logloss,probs = 0.05),
+            high_ci=quantile(logloss,probs=0.95)) %>% ungroup 
 
-roc_out <- roc_out %>% group_by(algo_type) %>% mutate(from_mean = (0.5 - V1)^2 + (0.5-V2)^2,
-                                                      line_labels = ifelse(from_mean==min(from_mean),algo_type,NA)) %>% 
-  ungroup %>% arrange(V1,V2)
+logloss_obs %>% ggplot(aes(y=mean_loss,x=reorder(obs_num,-mean_loss),ymax=high_ci,ymin=low_ci)) + geom_pointrange(colour='grey50') +
+  xlab("Observations") + ylab("Log Loss Over True Outcome") + theme(axis.text.x=element_blank(),
+                   axis.ticks.x=element_blank())
 
-roc_curves %>% ggplot(aes(y=TruePositive,x=FalsePositive,group=iter)) + geom_point(alpha=0.2,colour='grey50') + geom_abline(slope=1,
-                                                                                                                            intercept=0) +
-  geom_path(data=roc_out,aes(y=V1,x=V2,group=algo_type,colour=algo_type),size=0.8) + theme_minimal() +
-  theme(panel.grid.major=element_blank(),
-        panel.grid.minor=element_blank()) + annotate('rect',xmax=0.10,xmin=0,ymin=0.91,ymax=0.97,alpha=0.1,colour='pink') +
-  geom_text(data=roc_out,aes(y=V1,x=V2,group=algo_type,label=line_labels),hjust='inward',vjust='inward',check_overlap=TRUE) +
-  scale_color_brewer(palette='Set1')
+# plot tau against mean logloss per iter
 
-# plotly_out <- roc_curves  %>% plot_ly(x=~FalsePositive,y=~TruePositive,type='scatter') %>% add_markers()
-# 
-# plotly_POST(plotly_out)
+tau <- extract(base_model,'tau')[[1]][401:800] %>% as_data_frame %>% mutate(iter_number=paste0('Iter_',401:800))
+logloss_iter <- all_logloss %>% group_by(iter_number) %>% summarize(mean_loss=mean(logloss)) %>% ungroup
+
+logloss_iter %>% left_join(tau) %>% ggplot(aes(y=mean_loss,x=value)) + geom_point() + ylab("Mean Logloss") +
+  xlab("Values of Tau (Between Effect)") + stat_smooth()+ theme_minimal()
+
+# plot tau against mean logloss for bottom 1 percent 
+
+bottom1percent <- filter(logloss_obs,mean_loss<percent_rank(1))
+filter(all_logloss,obs_num %in% bottom1percent$obs_num) %>% group_by(iter_number) %>% 
+  summarize(mean_loss=mean(logloss)) %>% left_join(tau) %>% ggplot(aes(y=mean_loss,x=value)) + geom_point() + ylab("Mean Logloss Bottom 1 Percent") +
+  xlab("Values of Tau (Between Effect)") + stat_smooth()+ theme_minimal()
