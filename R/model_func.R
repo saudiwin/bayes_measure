@@ -1,7 +1,7 @@
 # Helper functions for model evaluation
 
 # # Add in ROC curve from existing data (algorithms)
-# 
+#
 make_roc <- function(algo_num=NULL,outcome=NULL,threshold=10000) {
   algo <- algos[[algo_num]]
   steps <- seq(from=0,to=1,length.out=threshold)

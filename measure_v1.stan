@@ -157,7 +157,7 @@ model {
 
 
 generated quantities {
-  /*
+/*
     vector[N] theta_prob;  // chance of success converted from logit scale
     int pred_success[N]; // Sample from binomial distribution regarding whether the customer bought the product or not
     matrix[threshold_num+1,2] roc_graph;
@@ -190,6 +190,6 @@ generated quantities {
     for(n in 1:N) {
     log_lik[n] = bernoulli_logit_lpmf(y[n] | alpha + x[n]*theta_raw);
     }
-  } */ 
+  } */
     
 }
