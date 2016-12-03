@@ -10,6 +10,12 @@ require(ggplot2)
 require(plotly)
 require(archivist)
 require(loo)
+require(algoeval)
+
+# Set random number seed
+
+seed <- 
+set.seed(seed)
 
 # Data directory for archivist R model collection
 
@@ -51,6 +57,67 @@ stan_file <- stan_model(stan_file,model_name='Binomial Bayes Measurement')
 # Centered parameterization: 5000 seconds with no divergent transitions, although low ESS on tau
 # Centered wins with more data
 
+# Null Model
+
+null_model <- sampling(stan_file,data=list(y=outcome,
+                                           x=as.matrix(algos),
+                                           N=length(outcome),
+                                           J=length(algos),
+                                           threshold_num=100,
+                                           thresh_real=100,
+                                           hier=hier),iter=800,chains=2,cores=2,seed=seed)
+
+# Full model
+
+bayes_model <- sampling(stan_file,data=list(y=outcome,
+                                            x=as.matrix(algos),
+                                            N=length(outcome),
+                                            J=length(algos),
+                                            threshold_num=100,
+                                            thresh_real=100,
+                                            hier=hier),iter=800,chains=2,cores=2,seed=seed)
+
+# Pick columns to do analysis on 
+
+outcols <- sample(400,100)
+
+# Check whether loo works or not
+
+loo1 <- get_log_lik(stan_sample=bayes_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800)
+mean_loo <- colMeans(loo1)
+# There is a problem with arithmetic underflow where very certain outcomes of the logit model come out as probability 1,
+# Which screws up the loo
+check_zeroes <- mean_loo==0
+loo1[,check_zeroes] <- loo1[,check_zeroes] + runif(n=400,max=-2*.Machine$double.neg.eps,min=-10*.Machine$double.neg.eps)
+#improbable <- -2*sd(mean_loo)>mean_loo
+this_loo <- loo(loo1)
+bad_pareto <- this_loo$pareto_k>0.7
+if(sum(bad_pareto)==0) {
+  print('No problematic outliers, proceed as usual')
+} else if(sum(bad_pareto)>1) {
+  print('There is a problem with the model, need to diagnose before proceeding further. There are some bad Pareto K estimates, but not all.')
+}
+  # } else if(mean(bad_pareto)>0.5) {
+#   print('Extreme outliers detected. Using a dummy variable to control for outliers.')
+#   algos <- mutate(algos,outliers=as.numeric(improbable))
+#   bayes_model <- sampling(stan_file,data=list(y=outcome,
+#                                               x=as.matrix(algos),
+#                                               N=length(outcome),
+#                                               J=length(algos),
+#                                               threshold_num=100,
+#                                               thresh_real=100,
+#                                               hier=hier),iter=800,chains=2,cores=2)
+#   loo1 <- get_log_lik(stan_sample=bayes_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800)
+#   this_loo <- loo(loo1)
+#   bad_pareto <- this_loo$pareto_k>0.7
+#   if(sum(bad_pareto)==0) {
+#     print('Outlier detection worked. PSIS-LOO estimate is stable')
+#   } else {
+#     print('Outlier detection failed. Model is still mis-specified.')
+#   }
+# }
+  
+
 # Loop over all algos
 
 all_models <- lapply(names(algos), function(x) {
@@ -68,23 +135,27 @@ all_models <- lapply(names(algos), function(x) {
   return(bayes_model)
 
 })
-# Check loo for hierarchical model
-# Loop over all bayes_model functions that match certain tags in archivist
-  
-  loo1 <- get_log_lik(stan_sample=bayes_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800)
+all_loos <- lapply(1:length(names(algos)),function(x) {
+  this_data <- select(algos,-one_of(names(algos)[x]))
+  out_log <- get_log_lik(stan_sample=all_models[[x]],outcome=outcome,algo_data=this_data,nwarmup=400,niters=800)
+  mean_loo <- colMeans(out_log)
+  # There is a problem with arithmetic underflow where very certain outcomes of the logit model come out as probability 1,
+  # Which screws up the loo
+  check_zeroes <- (mean_loo==0 | mean_loo>-200*.Machine$double.neg.eps)
+  out_log[,check_zeroes] <- out_log[,check_zeroes] + runif(n=400,max=-100*.Machine$double.neg.eps,min=-200*.Machine$double.neg.eps)
+  out_loo <- loo(out_log)
+  print(out_loo)
+  return(out_loo)
+})
+compare_loos <- lapply(all_loos,function(x) as.numeric(compare(this_loo,x))) %>% unlist %>% 
+  matrix(nrow = length(all_loos),ncol=2,byrow=TRUE) %>% as_data_frame
+names(compare_loos) <- c('ELPD','SE')
+compare_loos %<>% mutate(high_ci=ELPD + 1.96*SE,low_ci=ELPD - 1.96*SE,algos=names(algos))
 
-# it seems that some of the observations are very very unlikely -- i.e., the model is almost certainly wrong
+compare_loos %>% ggplot(aes(y=ELPD,x=reorder(algos,-ELPD))) + geom_errorbar(aes(ymin=low_ci,ymax=high_ci),width=0.2) + 
+  geom_point(colour='red',size=2) + theme_minimal() + ylab("Gain in ELPD") + xlab("")
 
+#OK, let's look at binary log-loss
+#Certainly easier to calculate than the former
 
-improbable <- which(-0.5>loo1[,8])
-loo_check1 <- loo(loo1[-improbable,])
-
-loo_data <- loo1 %>% as_data_frame
-names(loo_data) <- paste0('Iter',1:length(loo_data))
-loo_data <- mutate(loo_data,observation=paste0('Obs_',row_number()))
-loo_data <- sample_n(loo_data,100)
-loo_data <- gather(loo_data,iteration,log_density,-observation)
-
-loo_data %>% mutate(log_density=exp(log_density)) %>% 
-  ggplot(aes(y=log_density,x=observation)) + stat_smooth() + 
-  theme_minimal()
+all_rocs <- lapply(1:length(names(algos)),make_roc,outcome=outcome,all_models=all_models,algos=algos,outcols=outcols)

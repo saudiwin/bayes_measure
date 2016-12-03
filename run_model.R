@@ -77,15 +77,12 @@ loo1 <- get_log_lik(stan_sample=bayes_model,outcome=outcome,algo_data=algos,nwar
 # it seems that some of the observations are very very unlikely -- i.e., the model is almost certainly wrong
 
 
-improbable <- which(-0.5>loo1[,8])
-loo_check1 <- loo(loo1[-improbable,])
-
-loo_data <- loo1 %>% as_data_frame
-names(loo_data) <- paste0('Iter',1:length(loo_data))
-loo_data <- mutate(loo_data,observation=paste0('Obs_',row_number()))
+loo_data <- loo1[,sample(1:ncol(loo1),10000)] %>% as_data_frame
+names(loo_data) <- paste0('Obs',1:length(loo_data))
+loo_data <- mutate(loo_data,iteration=paste0('Iter_',row_number()))
 loo_data <- sample_n(loo_data,100)
-loo_data <- gather(loo_data,iteration,log_density,-observation)
+loo_data <- gather(loo_data,observation,log_density,-iteration)
 
 loo_data %>% mutate(log_density=exp(log_density)) %>% 
-  ggplot(aes(y=log_density,x=observation)) + stat_smooth() + 
+  ggplot(aes(y=log_density,x=reorder(observation,log_density)) + geom_point() + 
   theme_minimal()

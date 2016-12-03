@@ -1,0 +1,15 @@
+Package: algoeval
+Type: Package
+Title: Bayesian Predictive Measurement Functions for Algorithm Evaluation
+Version: 0.1.0
+Author: Robert Kubinec
+Maintainer: Robert Kubinec <rmk7xy@virginia.edu>
+Description: A package developed to create useful evaluation metrics for a
+    Bayesian hierarchical logit model.
+Depends:
+    dplyr, tidyr
+Imports:
+    data.table
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 5.0.1
