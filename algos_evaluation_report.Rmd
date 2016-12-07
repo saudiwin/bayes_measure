@@ -1,0 +1,228 @@
+---
+title: "Algorithm Evaluation Report"
+author: "Robert Kubinec"
+date: "December 4, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(dplyr)
+require(tidyr)
+require(magrittr)
+require(rstan)
+require(shinystan)
+require(ggplot2)
+require(plotly)
+require(archivist)
+require(loo)
+require(algoeval)
+
+# Set random number seed
+
+seed <- 1827813124
+set.seed(seed)
+
+# Pick columns to do analysis on 
+
+outcols <- sample(400,100)
+
+# Data directory for archivist R model collection
+
+repoDir <- 'data/'
+
+# Whether to use samples from the data or the full data
+
+sample_it <- FALSE
+
+# Whether to run a hierarchical model
+
+hier <- TRUE
+
+algo_data <- data.table::fread('data/all_combine_200k.csv') %>% as_data_frame
+
+outcome <- algo_data$realpurch
+
+# Standardize algorithmic output to the same scale
+
+algos <- select(algo_data,algo1,algo2,algo3,algo4,algo5) %>% mutate_all(scale) 
+
+bayes_model <- readRDS('bayes_model.rds')
+```
+
+### Approach and Predictive Accuracy
+
+Evaluating the different algorithms correctly requires using a proper baseline. There are three possible methods: 
+
+1. Remove an algorithm at a time from the hierarchical Bayes model and compare the restricted model to the full hierarchcial model.
+2. Use a null model (a logit model with only an intercept) and compare the null model to a model with each algorithm at a time.
+3. Compare a logit model with one algorithm at a time to the full hierarchical Bayes model.
+
+I decided to use the third approach because it appears to offer the best method of comparison. The full hierarchical model can be thought of as the gold standard and a rather high bar for any one algorithm to clear. Furthermore, removing one algorithm at a time from the hierarchical model did not result in any substantive evaluation because the hierarchical model was able to compensate, leaving little difference between the restricted and the full model to use for comparison. Using option #3 essentially says, how does an algorithm perform on its own when compared with a much more sophisticated model using much more information?
+
+As will be seen, this approach works well in separating out the individual contributions of algorithms. For this particular application, the algorithm evaluation was very straightforward because the algorithms had remarkably different performance. However, I believe that this approach would work well even in situations where the differences between the algorithms are less apparent.
+
+### Evaluation Metrics
+
+I used three different model evaluation metrics that were all aimed at understanding how well the model predicts the data (i.e., model fit). At the same time, it is important to avoid the issue of model over-fitting. It is possible to fit models very well to a certain data set but to underestimate the true variability in the outcome. As a result, a model could yield predictions that appear more accurate than they in fact are. The 2016 elections are a case in point of this problem.
+
+The first metric I use is designed to counter-act the issue of model fit. PSIS-LOO is an estimate of leave-one-out cross-validation (LOO-CV) applied in a Bayesian contest. LOO-CV involves fitting a model to the data excluding one observation iteratively. In other words, the model is tested at its ability to predict each observation separately. This is a widely-used metric in model evaluation because it helps avoid bias in over-fitting the data. In the Bayesian context, we have additional information because we know the variability in this estimate, which allows us to compare models and includes uncertainty (confidence interval) around the comparison. Furthermore, PSIS-LOO compensates for the complexity of the model by estimating an ``effective number of parameters" and subtracts that from the overall score. Another advantage is that PSIS-LOO is model-independent and can be used on any Bayesian model, including models with more categories than just Purchase or No Purchase.
+
+The second metric is the ROC curve, which measures the ratio of true-positives to false-positives as a function of a prediction threshold. The thresholds correspond to a certain probability of classifying an observation as a purchase based on the model. At 0.1, for example, a model will almost certainly get all the true positives correct but it will also label a lot of observations as false positives. At 0.9, the model will miss some of the true positives, but the number of false positives will be lower. This curve shows a different aspect of predictive performance by showing this trade-off. In a Bayesian context, we also have a confidence interval around this curve to show uncertainty and to enable us to distinguish models. Given that these are plots, there isn't a simple answer to whether an algorithm beat the full model aside from visual inspection. The higher the kink or bend in the curve, the better the model performance.
+
+The third metric is binary log-loss. This is a simple metric which can be calculated in any logit or categorical model. It adds up all of the prediction errors (differences between the logit model and the true outcome). This method represents a holistic evaluation of model fit, but unlike PSIS-LOO it does not penalize models for their complexity. To that end it should be taken with a note of caution that models with very low prediction error on this metric may not perform as well with additional data.
+
+### Plots
+
+```{r models, message=FALSE, warning=FALSE,include=FALSE}
+loo1 <- get_log_lik(stan_sample=bayes_model,outcome=outcome,algo_data=algos,nwarmup=400,niters=800)
+mean_loo <- colMeans(loo1)
+# There is a problem with arithmetic underflow where very certain outcomes of the logit model come out as probability 1,
+# Which screws up the loo
+check_zeroes <- mean_loo==0
+loo1[,check_zeroes] <- loo1[,check_zeroes] + runif(n=400,max=-100*.Machine$double.neg.eps,min=-200*.Machine$double.neg.eps)
+#improbable <- -2*sd(mean_loo)>mean_loo
+this_loo <- loo(loo1)
+
+stan_file <- stan_model('measure_singleton.stan',model_name='Binomial Bayes Measurement')
+all_models <- lapply(names(algos), function(x) {
+  
+  print(paste0('Now running ',x))
+  algos <- select(algos,one_of(x))
+  bayes_model <- sampling(stan_file,data=list(y=outcome,
+                                            x=as.matrix(algos),
+                                            N=length(outcome),
+                                            J=length(algos),
+                                            threshold_num=100,
+                                            thresh_real=100,
+                                            hier=hier),iter=800,chains=2,cores=2)
+  
+  return(bayes_model)
+
+})
+```
+
+
+```{r loos,include=FALSE}
+all_loos <- lapply(1:length(names(algos)),function(x) {
+  this_data <- select(algos,one_of(names(algos)[x]))
+  out_log <- get_log_lik(stan_sample=all_models[[x]],outcome=outcome,algo_data=this_data,nwarmup=400,niters=800)
+  mean_loo <- colMeans(out_log)
+  # There is a problem with arithmetic underflow where very certain outcomes of the logit model come out as probability 1,
+  # Which screws up the loo
+  check_zeroes <- (mean_loo==0 | mean_loo>-200*.Machine$double.neg.eps)
+  out_log[,check_zeroes] <- out_log[,check_zeroes] + runif(n=400,max=-100*.Machine$double.neg.eps,min=-200*.Machine$double.neg.eps)
+  check_neg_inf <- mean_loo < log(100*.Machine$double.neg.eps)
+  # It seems like smallest number you can log is 1e-300 (an infitesimal probability)
+  #see if there is a number besides infinity
+  # get the lowest non-infinite number (mean and sd)
+  min_mean <- min(mean_loo[!is.infinite(mean_loo)])
+  min_sd <- sd(out_log[,which(mean_loo==min_mean)])
+  out_log[,check_neg_inf] <- apply(out_log[,check_neg_inf,drop=FALSE],2,function(x) {
+      x <- log(runif(n=400,min=100*.Machine$double.neg.eps,max=200*.Machine$double.neg.eps))
+    return(x)
+  })
+  # out_log[,check_neg_inf] <- ifelse(is.infinite(out_log[,check_neg_inf]),0,out_log[,check_neg_inf])
+  # out_log[,check_neg_inf] <- out_log[,check_neg_inf] + runif(n=400,min=-(40+100*.Machine$double.neg.eps),
+  #                                                            max= -(40-100*.Machine$double.neg.eps) )
+  out_loo <- loo(out_log)
+  print(out_loo)
+  return(out_loo)
+})
+compare_loos <- lapply(all_loos,function(x) as.numeric(compare(this_loo,x))) %>% unlist %>% 
+  matrix(nrow = length(all_loos),ncol=2,byrow=TRUE) %>% as_data_frame
+names(compare_loos) <- c('ELPD','SE')
+compare_loos %<>% mutate(high_ci=ELPD + 1.96*SE,low_ci=ELPD - 1.96*SE,algos=names(algos))
+```
+
+```{r ROCs,include=FALSE}
+
+full_roc <- make_roc(algo_num = 'all',
+                     outcome=outcome,models=bayes_model,
+                     algos=algos,outcols=outcols,threshold=1000) %>% select(-Algorithm)
+
+full_roc %<>% group_by(Threshold) %>% summarize(mean_true=mean(True_Positives_Rate),
+                        mean_false=mean(False_Positive_Rate),
+                        high_ci=quantile(True_Positives_Rate,probs=.95),
+                        low_ci=quantile(True_Positives_Rate,probs=.05)) %>% ungroup
+
+all_rocs <- lapply(1:length(names(algos)),make_roc,outcome=outcome,models=all_models,algos=algos,outcols=outcols,
+                   threshold=1000)
+
+all_rocs <- all_rocs %>% bind_rows
+
+all_rocs <- all_rocs %>% group_by(Algorithm,Threshold) %>% 
+  summarize(mean_true=mean(True_Positives_Rate),
+            mean_false=mean(False_Positive_Rate),
+            high_ci=quantile(True_Positives_Rate,probs=.95),
+            low_ci=quantile(True_Positives_Rate,probs=.05)) %>% ungroup
+            
+```
+
+```{r logloss, include=FALSE}
+
+full_logloss <- binary_log_loss(algo_num='all',outcome=outcome,models=bayes_model,algos=algos)
+
+
+names(full_logloss) <- paste0("Iter_",401:800)
+full_logloss$obs_num <- paste0("Obs_",1:nrow(full_logloss))
+
+#Let's sample observations, otherwise it gets unwieldy
+
+sample_obs <- sample(1:nrow(full_logloss),1000)
+
+full_logloss <- full_logloss %>% slice(sample_obs) %>% gather(iter_number,logloss,-obs_num)
+
+logloss_obs_full <- full_logloss %>% group_by(obs_num) %>% 
+  summarize(mean_loss = mean(logloss),low_ci=quantile(logloss,probs = 0.05),
+            high_ci=quantile(logloss,probs=0.95)) %>% ungroup 
+
+
+all_logloss <- lapply(1:length(names(algos)),binary_log_loss,outcome=outcome,models=all_models,algos=algos)
+
+all_logloss <- lapply(all_logloss,as_data_frame)
+all_logloss <- lapply(all_logloss,slice,sample_obs)
+all_logloss <- bind_rows(all_logloss)
+
+names(all_logloss) <- paste0("Iter_",401:800)
+all_logloss$obs_num <- rep(paste0("Obs_",sample_obs),length(algos))
+all_logloss$type <- paste0("Algo_",rep(1:length(algos),each=length(sample_obs)))
+
+#Let's sample observations, otherwise it gets unwieldy
+
+all_logloss <- all_logloss %>% gather(iter_number,logloss,-obs_num,-type)
+
+logloss_obs_all <- all_logloss %>% group_by(type,obs_num) %>% 
+  summarize(mean_loss = mean(logloss),low_ci=quantile(logloss,probs = 0.05),
+            high_ci=quantile(logloss,probs=0.95)) %>% ungroup 
+```
+
+
+First, the PSIS-LOO metric shows clearly that one model out-performs all the others. The plot below shows the difference in predictive performance between each algorithm and the full hierarchical model. All of the algorithms perform more poorly, except for algorithm 5, which in fact does slightly better than the hierarchical model because it has fewer total parameters. This graph is a very straight-forward way to rank the algorithms on total predictive performance.
+
+```{r}
+compare_loos %>% ggplot(aes(y=ELPD,x=reorder(algos,-ELPD))) + geom_errorbar(aes(ymin=low_ci,ymax=high_ci),width=0.2) + 
+  geom_point(colour='red',size=2) + theme_minimal() + ylab("Performance Decrease Compared to Full Model") + xlab("")
+
+```
+
+Second, the ROC curve plots show each algorithm's prediction in blue against the full model's predictions in red. Again, none of the algorithms do quite as well as algorithm 5, although these plots make it somewhat harder to compare algorithms to each other. Rather, these plots establish that the top algorithms are able to maximize the true positive/false positive quite effectively. The algorithms are able to predict 95% of the true positives before they start making errors on false positives.
+
+```{r}
+all_rocs %>% ggplot(aes(y=mean_true,x=mean_false)) + facet_wrap(~Algorithm) +
+   geom_ribbon(data=full_roc,aes(ymin=low_ci,ymax=high_ci),fill='red',colour='red',alpha=0.5) + geom_ribbon(aes(ymin=low_ci,ymax=high_ci),fill='blue',colour='blue',alpha=0.5) +
+  theme_minimal() + xlab("False Positive Rate") + ylab("True Positive Rate") + scale_x_continuous(labels=scales::percent) + scale_y_continuous(labels=scales::percent)
+```
+
+Finally, the binary log-loss shows the performance of the models at the observation-level. The scale of these plots is set up so that higher numbers equal smaller prediction errors. The full model is shown in red while the individual models are shown in blue. The top algorithm, algorithm 5, has similar predictions to the hierarchical model but has a tighter confidence interval among observations with high accuracy compared to the hierarchical model. Because the hierarchical model takes into account all of the algorithms, it has higher uncertainty than the model with only algorithm 5. However, that trade-off is mostly apparent because algorithm 5 clearly outperforms the other algorithms.
+
+Algorithms 2 and 3 perform similarly to the full model except for observations with high accuracy, where they have very wide confidence intervals. 
+
+```{r}
+logloss_obs_all %>% ggplot(aes(x=reorder(obs_num,mean_loss))) + geom_ribbon(data=logloss_obs_full,aes(ymin=low_ci,ymax=high_ci),colour="red") +
+  geom_ribbon(aes(ymin=low_ci,ymax=high_ci),colour='blue') + facet_wrap(~type) + xlab("") +
+  ylab("Total Prediction Gain") + theme_minimal() + theme(axis.text.x=element_blank(),plot.background = element_blank(),
+                                               panel.background=element_blank()) +ylim(0,20)
+```
+

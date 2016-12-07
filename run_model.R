@@ -12,6 +12,11 @@ require(plotly)
 require(archivist)
 require(loo)
 
+# Set seed for reproducibility
+
+seed <- 1827813124
+set.seed(seed)
+
 # Data directory for archivist R model collection
 
 repoDir <- 'data/'

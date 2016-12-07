@@ -99,7 +99,7 @@ parameters {
   // relative to the population-level variance to reduce correlation in the posterior
   
   
-  real mu<lower=0,upper=1>;
+  real<lower=0,upper=1> mu;
 }
 
 transformed parameters {

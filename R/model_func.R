@@ -4,22 +4,45 @@
 #' @export
 #' @import dplyr
 #' @import tidyr
-make_roc <- function(algo_num=NULL,outcome=NULL,all_models=NULL,algos=NULL,threshold=100,
+make_roc <- function(algo_num='all',outcome=NULL,models=NULL,algos=NULL,threshold=1000,
                      nwarmup=400,niters=800,outcols=NULL) {
-  stan_sample <- all_models[[algo_num]]
-  predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
-  intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
-  predictors <- predictors[outcols,]
-  intercept <- intercept[outcols]
-  print(paste0('Now processing algorithm ',names(algos)[algo_num]))
-  algo_data <-  select(algos,-one_of(names(algos)[algo_num])) %>% as.matrix
   
-  raw_predict <- algo_data %*% t(predictors)
-  rm(predictors)
-  raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t
-  # apply loop is too memory hungry
-  # switch to data.table to modify one column at a time in-place
-  raw_predict <- data.table::as.data.table(raw_predict)
+  if(algo_num!='all') {
+    print(paste0('Now processing algorithm ',names(algos)[algo_num]))
+    algo_data <-  select(algos,one_of(names(algos)[algo_num])) %>% as.matrix
+    stan_sample <- models[[algo_num]]
+    
+    predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
+    intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
+    predictors <- predictors[outcols]
+    intercept <- intercept[outcols]
+    
+    # Convert predictors to matrix to enable matrix multiplication
+    # then it is conformable if transposed (NX1) x (1XS) where N=data and S=iterations
+     
+    raw_predict <- algo_data %*% t(as.matrix(predictors))
+    rm(predictors)
+    raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t
+    # apply loop is too memory hungry
+    # switch to data.table to modify one column at a time in-place
+    raw_predict <- data.table::as.data.table(raw_predict)
+    
+  } else {
+    stan_sample <- models
+    algo_data <- as.matrix(algos)
+    predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
+    intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
+    predictors <- predictors[outcols,]
+    intercept <- intercept[outcols]
+    
+    raw_predict <- algo_data %*% t(predictors)
+    rm(predictors)
+    raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t
+    # apply loop is too memory hungry
+    # switch to data.table to modify one column at a time in-place
+    raw_predict <- data.table::as.data.table(raw_predict)
+  }
+  
   
   #calculate predicted probabilities per observation
   raw_predict <- raw_predict[,lapply(.SD,plogis)]
@@ -43,12 +66,7 @@ make_roc <- function(algo_num=NULL,outcome=NULL,all_models=NULL,algos=NULL,thres
     return(roc_data)
   }) %>% bind_rows
   names(rocs) <- c('True_Positives_Rate','False_Positive_Rate','Algorithm','Threshold','Iteration')
-  # rocs_sum <- rocs %>% group_by(Threshold,Algorithm) %>% summarize(tpr_mean=mean(True_Positives_Rate),
-  #                                                                  tpr_high=quantile(True_Positives_Rate,probs=0.9),
-  #                                                                  tpr_low=quantile(True_Positives_Rate,probs=0.1),
-  #                                                                  fpr_mean=mean(False_Positive_Rate),
-  #                                                                  fpr_high=quantile(False_Positive_Rate,probs=0.9),
-  #                                                                  fpr_low=quantile(False_Positive_Rate,probs=0.1))
+
   return(rocs)
 }
 
@@ -77,16 +95,30 @@ get_log_lik <- function(stan_sample=NULL,outcome=NULL,algo_data=NULL,nwarmup=NUL
 }
 
 #' @export
-binary_log_loss <- function(stan_sample=NULL,outcome=NULL,algo_data=NULL,nwarmup=NULL,
-                            niters=NULL) {
-  
-  predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
-  intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
-  algo_data <- as.matrix(algo_data)
-  
-  raw_predict <- algo_data %*% t(predictors)
-  rm(predictors)
-  raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t
+binary_log_loss <- function(algo_num='all',outcome=NULL,models=NULL,algos=NULL,
+                            nwarmup=400,niters=800) {
+  if(algo_num!='all') {
+    print(paste0('Now processing algorithm ',names(algos)[algo_num]))
+    algo_data <-  select(algos,one_of(names(algos)[algo_num])) %>% as.matrix
+    stan_sample <- models[[algo_num]]
+    
+    predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters]
+    intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
+    algo_data <- as.matrix(algo_data)
+    
+    raw_predict <- algo_data %*% t(as.matrix(predictors))
+    rm(predictors)
+    raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t  
+  } else {
+    stan_sample <- models
+    predictors <- rstan::extract(stan_sample,pars='theta_raw')[[1]][(nwarmup+1):niters,]
+    intercept <- rstan::extract(stan_sample,pars='alpha')[[1]][(nwarmup+1):niters]
+    algo_data <- as.matrix(algos)
+    
+    raw_predict <- algo_data %*% t(predictors)
+    rm(predictors)
+    raw_predict <- apply(raw_predict,1,function(x) x + intercept) %>% t
+  }
   # apply loop is too memory hungry
   # switch to data.table to modify one column at a time in-place
   raw_predict <- data.table::as.data.table(raw_predict)
@@ -105,3 +137,4 @@ binary_log_loss <- function(stan_sample=NULL,outcome=NULL,algo_data=NULL,nwarmup
   return(log_loss)
   
 }
+
