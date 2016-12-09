@@ -1,0 +1,70 @@
+---
+title: "Demonstration of Evaluation of Algorithms"
+author: "Robert Kubinec"
+date: 'December 10, 2016'
+output: html_notebook
+---
+
+```{r setup,include=FALSE}
+require(Rsolnp)
+require(ggplot2)
+require(dplyr)
+require(tidyr)
+
+set.seed(12062016)
+
+n <- 1000
+g <- n/10
+algos <- seq(0,5,length.out=1000)
+output_budget <- 1:1000
+output_profit <- 1:1000
+
+```
+
+### Use Case: Marketing Segmentation
+
+For the first demonstration, we look at a firm that is trying to find the optimal advertising budget. The challenge is to target the budget effectively without knowing ahead of time who are the customers most interested in purchasing and thus more likely to respond to ads. We assume for this example that the chance a customer buys is unknown but that we know how effective ads are if a customer does buy. We can maximize the advertising budget if we can target the budget at customers who we have a very strong reason to believe will make a purchase within the next few months.
+
+To estimate the chance of a consumer purchasing, we set up a budget of $1,500 to use to purchase algorithmic evaluations of our customer database. We buy three different algorithms each of which makes a different prediction of the chance of a customer purchasing. We then use these algorithms to target our ad revenue, and then we observe whether or not a customer purchases.
+
+However, there is a problem in that we dont't know when we purchase the algorithms whether they can in fact predict consumer purchase. For that reason, it is not clear how much to spend on each algorithm and which companies are the most effective. We want to pay for each algorithm in relation to its ability to maximize firm profit. In other words, we want to maximize the following firm profit function:
+
+
+
+
+
+```{r objective, echo=TRUE, message=FALSE}
+exp_revenue <- function(budget=NULL,out_data=NULL,sum_data=NULL) {
+  out_data <- mutate(out_data,e_rev = outcome * (2 + budget*soft_latent*5 - 2.5*(budget*soft_latent)^2))
+  e_profit <- sum(out_data$e_rev) - budget*n - sum(out_data$e_rev)*.25 - 1500
+  return(e_profit)
+}
+```
+
+```{r simulation, echo=TRUE,message=FALSE}
+for(i in 1:1000) {
+# Create an algorithm with considerable predictive power
+latent <- rnorm(n*g,algos[i],sd=0.5) 
+outcome <- runif(n,0,1) < plogis(latent + rnorm(n,0,2))
+
+# Sort so we can segment the market
+out_data <- data_frame(latent = plogis(latent),as.integer(outcome)) %>% arrange(desc(latent))
+out_data$groups <- factor(rep(1:10, each=n/10))
+out_sum <- group_by(out_data,groups) %>% summarize(soft_latent=mean(latent)) %>% ungroup 
+out_data <- left_join(out_data,out_sum,by='groups')
+
+max_value <- optimize(exp_revenue,interval=c(0,10000),out_data=out_data,sum_data=sum_data,
+                      maximum=TRUE)
+output_budget[i] <- max_value$maximum
+output_profit[i] <- max_value$objective
+}
+```
+
+```{r plot_all_sim}
+data_frame(algos,Profit=output_profit,Advertising=output_budget*1000) %>%  gather(outcome_var,amount,-algos) %>%  ggplot(aes(y=amount,x=algos)) +
+  geom_point() + theme_minimal() + facet_wrap(~outcome_var,scales='free_y') + xlab('Algorithm Predictive Power') + ylab('Amount in Dollars')
+
+```
+
+
+
