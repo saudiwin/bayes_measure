@@ -17,14 +17,6 @@ data {
   int y[N];
   
   //number of points in [0,1] to evaluate ROC function
-  int threshold_num;
-  
-  //same # but for calculation purposes
-  real thresh_real;
-  
-  //whether model is hierachical (necessaray for loo calculation)
-  
-  int hier;
   
 }
 
@@ -60,4 +52,12 @@ model {
   //Model sampling statement -- bernoulli model with logit link function (equivalent to GLM with logit link)
   
   y ~ bernoulli_logit(alpha + x*theta_raw);  
+}
+
+generated quantities {
+  vector[N] theta_prob;
+  
+    for (n in 1:N) {
+    theta_prob[n] = inv_logit(alpha + x[n]*theta_raw);
+    }
 }

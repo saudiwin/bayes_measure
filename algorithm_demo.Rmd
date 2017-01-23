@@ -1,70 +1,373 @@
 ---
 title: "Demonstration of Evaluation of Algorithms"
 author: "Robert Kubinec"
-date: 'December 10, 2016'
-output: html_notebook
+date: "December 10, 2016"
+output:
+  html_document: 
+    code_folding: hide
+  html_notebook: default
 ---
 
 ```{r setup,include=FALSE}
-require(Rsolnp)
+
 require(ggplot2)
 require(dplyr)
 require(tidyr)
+require(rstan)
+require(bayesplot)
+require(algoeval)
+require(loo)
+require(magrittr)
 
 set.seed(12062016)
 
 n <- 1000
-g <- n/10
-algos <- seq(0,5,length.out=1000)
+g <- 10
+N <- n*g
+algo_count <- seq(0,5,length.out=1000)
 output_budget <- 1:1000
 output_profit <- 1:1000
+outcome <- rbinom(N,1,0.3)
 
+normalize <- function(x) {
+  z <- (x - min(x))/(max(x) - min(x))
+  return(z)
+}
 ```
 
-### Use Case: Marketing Segmentation
+### Demonstration: Market Segmentation
 
 For the first demonstration, we look at a firm that is trying to find the optimal advertising budget. The challenge is to target the budget effectively without knowing ahead of time who are the customers most interested in purchasing and thus more likely to respond to ads. We assume for this example that the chance a customer buys is unknown but that we know how effective ads are if a customer does buy. We can maximize the advertising budget if we can target the budget at customers who we have a very strong reason to believe will make a purchase within the next few months.
 
-To estimate the chance of a consumer purchasing, we set up a budget of $1,500 to use to purchase algorithmic evaluations of our customer database. We buy three different algorithms each of which makes a different prediction of the chance of a customer purchasing. We then use these algorithms to target our ad revenue, and then we observe whether or not a customer purchases.
+To estimate the chance of a consumer purchasing, we set up a budget of \$1,500 to use to purchase algorithmic evaluations of our customer database. We buy three different algorithms, each of which makes a different prediction of the chance of a customer purchasing. We then use these algorithms to target our ad revenue, and then we observe whether or not a customer purchases.
 
-However, there is a problem in that we dont't know when we purchase the algorithms whether they can in fact predict consumer purchase. For that reason, it is not clear how much to spend on each algorithm and which companies are the most effective. We want to pay for each algorithm in relation to its ability to maximize firm profit. In other words, we want to maximize the following firm profit function:
+However, there is a problem in that we don't know when we purchase the algorithms whether they can in fact predict consumer purchase. For that reason, it is not clear how much to spend on each algorithm and which algorithm producers are the most effective. We want to pay for each algorithm in relation to its ability to maximize firm profit. In other words, we want to maximize the following firm profit function:
 
+$$P = R - (B + A + MC)$$
+$$R = Q (2 + 10A - A^2)$$
+$$B = 1500$$
+$$MC = 0.25R$$
 
-
-
+This formula says that the amount of profit $P$ is a function of the amount of revenue earned $R$ minus the total costs, which include $B$ spent on hiring algorithms, $A$ for advertising, and $MC$ for the cost of production. Revenue is a function of $Q$, the quantity sold, times an average purchase of \$2 dollars plus a marginally-declining function of the amount of advertising for that customer. In this example, we assume that $B$ is fixed at \$1500. The cost of production $MC$ is a fixed proportion of the amount sold $R$. We want to maximize this function over the parameter $A$, the advertising budget, so that we can obtain an optimal amount of profit. We target the advertising budget by weighting it towards groups of customers (i.e., market segments) depending on their probability of purchase. The following R code implements this profit function.
 
 ```{r objective, echo=TRUE, message=FALSE}
-exp_revenue <- function(budget=NULL,out_data=NULL,sum_data=NULL) {
-  out_data <- mutate(out_data,e_rev = outcome * (2 + budget*soft_latent*5 - 2.5*(budget*soft_latent)^2))
-  e_profit <- sum(out_data$e_rev) - budget*n - sum(out_data$e_rev)*.25 - 1500
+exp_revenue <- function(budget=NULL,out_data=NULL) {
+    out_data <- mutate(out_data,e_rev = outcome * (2 + budget*soft_latent*10 - (budget*soft_latent)^2))
+  e_profit <- sum(out_data$e_rev) - budget*N - sum(out_data$e_rev)*.25 - 1500
   return(e_profit)
 }
 ```
 
+
+We can then simulate data where the amount of purchases by customers is a function of an algorithm (i.e. the customer's willingness to spend) plus an error term. We can simulate predictive capabilities of algorithms by creating a random sequence of purchase data and then creating an algorithm that predicts with a certain probability either purchase and non-purchase. For this example, I vary the difference between the algorithm's predictions of purchase/non-purchase by a level of 0 to 5 on the logit scale (from a coin-flip to near-certainty). As the difference increases, the algorithms become more and more accurate. The ads are targeted to 100 groups of 100 customers each that are ranked according to their latent propensity to spend, which is an estimate of the algorithm. Then we can optimize the profit function to find the advertising budget that maximizes profit given our knowledge of our customers.
+
 ```{r simulation, echo=TRUE,message=FALSE}
 for(i in 1:1000) {
-# Create an algorithm with considerable predictive power
-latent <- rnorm(n*g,algos[i],sd=0.5) 
-outcome <- runif(n,0,1) < plogis(latent + rnorm(n,0,2))
+# Vary the algorithm's predictive power
+x1 <- rnorm(N,algo_count[i],sd=1)
+x2 <- rnorm(N,-algo_count[i],sd=1)
+
+latent <- ifelse(outcome==1,x1,x2)
+#outcome <- runif(n,0,1) < plogis((-.5 - mean(x1)+ latent)
 
 # Sort so we can segment the market
-out_data <- data_frame(latent = plogis(latent),as.integer(outcome)) %>% arrange(desc(latent))
-out_data$groups <- factor(rep(1:10, each=n/10))
+out_data <- data_frame(latent = plogis(latent),outcome=as.integer(outcome)) %>% arrange(desc(latent))
+out_data$groups <- factor(rep(1:100, each=N/100))
 out_sum <- group_by(out_data,groups) %>% summarize(soft_latent=mean(latent)) %>% ungroup 
 out_data <- left_join(out_data,out_sum,by='groups')
 
-max_value <- optimize(exp_revenue,interval=c(0,10000),out_data=out_data,sum_data=sum_data,
-                      maximum=TRUE)
+max_value <- optimize(exp_revenue,interval=c(0,10000),out_data=out_data,maximum=TRUE)
+
 output_budget[i] <- max_value$maximum
 output_profit[i] <- max_value$objective
 }
 ```
 
-```{r plot_all_sim}
-data_frame(algos,Profit=output_profit,Advertising=output_budget*1000) %>%  gather(outcome_var,amount,-algos) %>%  ggplot(aes(y=amount,x=algos)) +
-  geom_point() + theme_minimal() + facet_wrap(~outcome_var,scales='free_y') + xlab('Algorithm Predictive Power') + ylab('Amount in Dollars')
+
+The plot below shows the amount of advertising needed to produce a given level of profit as algorithm predictions become more accurate. An algorithm with a difference of 0 between purchase and non-purchase, which means that it is essentially random noise, requires an advertising budget of \$10,500 to produce a profit of approximately \$4,500. An algorithm that is highly predictive--a coefficient of 5--can yield a profit of \$21,000 with an advertising budget of \$20,500 (note that the profit is already net of the increase in advertising). These numbers take into account the cost of purchasing the algorithms, which is fixed at \$1,500. Above a threshold of 3 in algorithm performance, profit continues to increase while advertising budgets are flat, which would be the ideal situation. 
+
+To summarize, puchasing algorithms to maximize advertising budgets can be a very profitable activity, but it crucially depends on being able to measure the algorithm's performance. In a real world situation, we do not know the true algorithm's coefficient, and we must estimate it from the available data.
+
+```{r plot_all_sim,message=FALSE}
+data_frame(algo_count,Profit=output_profit,Advertising=output_budget*N) %>%  gather(outcome_var,amount,-algo_count) %>%  ggplot(aes(y=amount,x=algo_count)) +
+  geom_point(size=0.5) + theme_minimal() + facet_wrap(~outcome_var,scales='free_y') + xlab('Algorithm Predictive Power') + ylab('Amount in Dollars') 
+
+```
+
+We demonstrate our method at estimating algorithms' predictive performance by analyzing a situation in which the company purchases three algorithms, a high performance (coefficient of 2) algorithm, medium performance (coefficient of 0.5), and low performance (coefficient of 0.1). We first estimate each of these algorithms in a hierarchical logit model in which the means and standard deviations of the algorithms' coefficients come from a common distribution. This model induces shrinkage in the coefficients towards an overall mean and is a conservative estimate of their performance. We use this model as the gold standard for the algorithms' predictive capabilities. This model is estimated through MCMC using the Bayesian modeling framework Stan.
+
+```{r hierarchical1, message=FALSE, warning=FALSE}
+high_algo <- 2
+med_algo <- 0.5
+low_algo <- 0.1
+
+x1 <- rnorm(N,sd=0.25)
+x2 <- rnorm(N,sd=0.25)
+x3 <- rnorm(N,sd=.25)
+
+latent_high <- high_algo * x1
+latent_med <- med_algo * x2
+latent_low <- low_algo * x3
+
+outcome <- (runif(N,0,1) < plogis(-1 + latent_high + latent_med + latent_low)) %>% as.numeric
+
+```
+
+```{r run_models, include=FALSE}
+
+# compile stan models
+model_noncent <- stan_model(file='measure_v1.stan')
+model_null <- stan_model(file='measure_null.stan')
+model_single <- stan_model(file='measure_singleton.stan')
+
+full_model <- sampling(model_noncent,data=list(N=length(outcome),J=3, X=cbind(x1,x2,x3), y=outcome),iter=1500,chains=2,cores=2,thin=2,control=list(adapt_delta=0.92),seed=12062016)
+
+int_model <- sampling(model_null,data=list(N=length(outcome), y=outcome),iter=1500,thin=2,chains=2,cores=2,
+                       show_messages=FALSE,seed=12062016)
+null_model <- sampling(model_null,data=list(N=N,y=rbinom(N,1,0.5)),seed=12062016)
+
+```
+
+```{r plot_full}
+posterior_full <- rstan::extract(full_model,permuted=FALSE)
+
+mcmc_intervals(posterior_full,regex_pars='\\btheta_raw\\[')
+```
+
+
+These three theta parameters are the estimates for the three algorithms. These estimates are pulled towards each other because of shrinkage induced by the hierarchical prior. This model represents the best available estimate that takes into account the individual algorithms while also considering the variability between the algorithms' estimates. The hierarchical mean expresses the overall performance of the algorithms:
+
+```{r}
+mcmc_intervals(posterior_full,pars='mu')
+```
+
+The overall mean has an average of 1, which means that on average all three algorithms have predictive performance that is somewhere in-between all three algorithms' coefficients of 0.1, 0.5 and 2.
+
+
+Second, as a baseline we estimate an additional logit model that incorporates what we already know about our customers. In this situation, we assume that we have a good estimate of how our customers will purchase in the aggregate but we can't target individuals because we lack the data. To produce this baseline estimate, I run a logit model using the same outcomes as the full model but with only an intercept. 
+
+```{r mu, message=FALSE,warning=FALSE}
+posterior_null <- rstan::extract(int_model,permuted=FALSE)
+
+mcmc_intervals(posterior_null,pars='mu')
+```
+
+In this model mu is the only parameter, which represents the average chance that a customer buys. This is equivalent to simply dividing the number of purchases by the sample size. However, this null model also gives us an estimate of uncertainty, as the average chance of purchase could be from 0.27 to 0.29. This uncertainty is important to permit valid statistical inference.
+
+Next we use our profit function for both the null model and the full hierarchical model, and we measure the difference between the two. We do so by iterating over all the draws of the predictor variables from the posterior, which enables us to measure the uncertainty in our estimate of the difference in profits between the full model and the null model.
+
+```{r compare_profit}
+post_theta <- rstan::extract(full_model,pars='theta_prob')[[1]]
+post_null <- rstan::extract(int_model,pars='mu')[[1]]
+num_iters <- nrow(post_theta)
+output_budget_theta <- 1:num_iters
+output_profit_theta <- 1:num_iters
+
+for(i in 1:num_iters) {
+
+# Sort so we can segment the market
+out_data <- data_frame(latent = post_theta[i,],outcome=as.integer(outcome)) %>% arrange(desc(latent))
+out_data$groups <- factor(rep(1:100, each=N/100))
+out_sum <- group_by(out_data,groups) %>% summarize(soft_latent=mean(latent)) %>% ungroup 
+out_sum$soft_latent <- DMwR::SoftMax(out_sum$soft_latent)
+out_data <- left_join(out_data,out_sum,by='groups')
+
+max_value <- optimize(exp_revenue,interval=c(0,10000),out_data=out_data,maximum=TRUE)
+
+output_budget_theta[i] <- max_value$maximum
+output_profit_theta[i] <- max_value$objective
+}
+
+output_budget_null <- 1:num_iters
+output_profit_null <- 1:num_iters
+
+for(i in 1:num_iters) {
+
+# Sort so we can segment the market
+out_data <- data_frame(latent = post_null[i],outcome=as.integer(outcome)) %>% arrange(desc(latent))
+out_data$groups <- factor(rep(1:100, each=N/100))
+out_sum <- group_by(out_data,groups) %>% summarize(soft_latent=mean(latent)) %>% ungroup 
+out_data <- left_join(out_data,out_sum,by='groups')
+
+max_value <- optimize(exp_revenue,interval=c(0,10000),out_data=out_data,maximum=TRUE)
+
+output_budget_null[i] <- max_value$maximum
+output_profit_null[i] <- max_value$objective
+}
+
+output_budget_diff <- (output_budget_null - output_budget_theta)*N
+output_profit_diff <- output_profit_theta - output_profit_null
+
+```
+
+We can compare how well the algorithms perform relative to our prior knowledge before purchasing the algorithms. In this scenario, we observe the following differences in budget and profit between the full model and a model with only an intercept:
+
+```{r}
+
+data_frame(mean_diff=c(mean(output_budget_diff),mean(output_profit_diff)),high_diff=c(quantile(output_budget_diff,0.95),quantile(output_profit_diff,0.95)),low_diff=c(quantile(output_budget_diff,0.05),quantile(output_profit_diff,0.05)),type=c('Budget','Profit'),base_type='Difference') %>% ggplot(aes(y=mean_diff,x=base_type)) + geom_errorbar(aes(ymin=low_diff,ymax=high_diff),width=0.25) + facet_wrap(~type,scales='free_y') + theme_minimal() + ylab('Dollars') + xlab('') + geom_point()
 
 ```
 
 
+This analysis shows how the algorithms help the firm save money. In this situation, the null model requires a budget that is \$11,550 greater to achieve a profit that is \$1,350 less than the full model with all algorithms. The profit margin between the full and null models gives us an idea of the amount of surplus that the firm earned through its business decision. Now that we have established that the purchase of the algorithms was a good business decision, we can decide how to pay each algorithm as a function of its predictive performance.
 
+The easiest method to evaluate the algorithms would be to rank them in order of the coefficients in the hierarchical model. While that would work in this particular example, algorithms with high collinearity may not be easily ranked within one model because each estimate takes into account the other algorithms. A better approach is to compare a logit model with only one algorithm and then compare it to full model to see the difference in predictive performance.
+
+There are different possible metrics that could be used to evaluate the models. I use two metrics here. The first is to calculate the difference in profit & revenue between the single-algorithm model and the full model, similar to how we analyzed the null model. A second approach is to use a Bayesian version of leave-one-out cross-validation (LOO-CV) known as PSIS-LOO. This method provides an estimate of the out-of-sample predictive performance of each algorithm, and also gives a confidence interval over the difference between any two models. PSIS-LOO is a superior metric for model evaluation because it takes into account the possibility of model over-fitting. However, in an applied context, the two metrics will provide broadly similar results, and may depend on which metric the algorithm provider prefers to use.
+
+First we run three logit models using each individual algorithm in turn as a predictor on the original data. Then we calculate the same profit-revenue statistics for each model and compare them to the full model.
+
+```{r indiv_models,include=FALSE}
+high_algo <- sampling(model_single,data=list(N=length(outcome),J=1, x=as.matrix(x1), y=outcome),iter=1500,chains=2,cores=2,thin=2,control=list(adapt_delta=0.92))
+med_algo <- sampling(model_single,data=list(N=length(outcome),J=1, x=as.matrix(x2), y=outcome),iter=1500,chains=2,cores=2,thin=2,control=list(adapt_delta=0.92))
+low_algo <- sampling(model_single,data=list(N=length(outcome),J=1, x=as.matrix(x3), y=outcome),iter=1500,chains=2,cores=2,thin=2,control=list(adapt_delta=0.92))
+
+```
+
+```{r compare_indiv}
+
+post_theta_high <- rstan::extract(high_algo,pars='theta_prob')[[1]]
+post_theta_med <- rstan::extract(med_algo,pars='theta_prob')[[1]]
+post_theta_low <- rstan::extract(low_algo,pars='theta_prob')[[1]]
+
+over_algos <- function(x) {
+
+output_budget_theta <- 1:num_iters
+output_profit_theta <- 1:num_iters
+
+for(i in 1:num_iters) {
+
+# Sort so we can segment the market
+out_data <- data_frame(latent = x[i,],outcome=as.integer(outcome)) %>% arrange(desc(latent))
+out_data$groups <- factor(rep(1:100, each=N/100))
+out_sum <- group_by(out_data,groups) %>% summarize(soft_latent=mean(latent)) %>% ungroup 
+out_sum$soft_latent <- DMwR::SoftMax(out_sum$soft_latent)
+out_data <- left_join(out_data,out_sum,by='groups')
+
+max_value <- optimize(exp_revenue,interval=c(0,10000),out_data=out_data,maximum=TRUE)
+
+output_budget_theta[i] <- max_value$maximum
+output_profit_theta[i] <- max_value$objective
+}
+
+return(list(budget=output_budget_theta,profit=output_profit_theta))
+
+}
+
+all_algos <- list(post_theta_high,post_theta_med,post_theta_low)
+
+output_all <- lapply(all_algos,over_algos)
+
+output_diff <- lapply(output_all,function(x) {
+  x$budget <- (x$budget - output_budget_theta)*N
+  x$profit <- output_profit_theta - x$profit 
+  return(x)
+})
+
+plot_diff <- lapply(output_diff,function(x) {
+  data_frame(budget_mean=mean(x$budget),budget_high=quantile(x$budget,probs=0.95),budget_low=quantile(x$budget,probs=0.05),profit_mean=mean(x$profit),profit_high=quantile(x$profit,probs=0.95),profit_low=quantile(x$profit,probs=0.05))
+})
+```
+
+```{r plot_all_algos}
+plot_diff %>% bind_rows %>% gather(type,diff) %>% separate(type,into=c('type','suffix')) %>% mutate(algo_type=rep(paste0('Algo_',c('High','Medium','Low')),times=n()/3)) %>% spread(suffix,diff) %>% ggplot(aes(y=mean,x=reorder(algo_type,-mean))) + geom_errorbar(aes(ymin=low,ymax=high),width=0.25) + facet_wrap(~type,scales='free_y') + theme_minimal() + ylab('Dollars') + xlab('') + geom_point()
+```
+
+We see from these plots that the performance of the algorithms in terms of cost savings is broadly similar to the coefficients of the hierarchical model, though not exactly so. The best-performing algorithm requires a budget that is very similar to the hierarchical model and produces only slightly less profit. Furthermore, this difference in terms of profit is not statistically significant as the confidence interval includes zero. The low and medium algorithms can be distinguished from each other in terms of how much profit they can produce, but they are both far behind the top algorithm.
+
+We can now perform a similar type of analysis, except that this time we use the PSIS-LOO metric, which is a model-independent evaluation of predictive performance. PSIS-LOO produces three critiera: ELPD, which is the total log density of the leave-one-out cross-validitions; P_LOO, which is an estimate of the effective number of parameters, and LOO_IC, which is ELPD times -2 in order to be on the same scale as other information criteria like AIC and BIC. For this example, we focus on ELPD, although the other two criteria could also be used. The advantage of using PSIS-LOO compared to traditional cross-validation is that it does not require the calculation of models for each data point or hold-out sample. Rather, it uses the posterior draws of the Bayesian model to provide a statistically valid approximation.
+
+```{r psis_loo_calc}
+
+algos <- data_frame(algo_high=x1,algo_med=x2,algo_low=x3)
+
+# First get PSIS-LOO for full model
+loo1 <- get_log_lik(stan_sample=full_model,outcome=outcome,algo_data=algos,nwarmup=num_iters/2,niters=num_iters)
+mean_loo <- colMeans(loo1)
+
+# There is a problem with arithmetic underflow where very certain outcomes of the logit model come out as probability 1,
+# Which screws up the loo
+check_zeroes <- mean_loo==0
+loo1[,check_zeroes] <- loo1[,check_zeroes] + runif(n=400,max=-100*.Machine$double.neg.eps,min=-200*.Machine$double.neg.eps)
+this_loo <- loo(loo1)
+print(this_loo)
+# Then calculate PSIS-LOO for each invidual model
+
+all_models <- list(high=high_algo,med=med_algo,low=low_algo)
+
+
+all_loos <- lapply(1:length(names(algos)),function(x) {
+  this_data <- select(algos,one_of(names(algos)[x]))
+  out_log <- get_log_lik(stan_sample=all_models[[x]],outcome=outcome,algo_data=this_data,nwarmup=(num_iters)/2,niters=num_iters)
+  mean_loo <- colMeans(out_log)
+  # There is a problem with arithmetic underflow where very certain outcomes of the logit model come out as probability 1,
+  # Which screws up the loo
+  check_zeroes <- (mean_loo==0 | mean_loo>-200*.Machine$double.neg.eps)
+  out_log[,check_zeroes] <- out_log[,check_zeroes] + runif(n=400,max=-100*.Machine$double.neg.eps,min=-200*.Machine$double.neg.eps)
+  check_neg_inf <- mean_loo < log(100*.Machine$double.neg.eps)
+  # It seems like smallest number you can log is 1e-300 (an infitesimal probability)
+  #see if there is a number besides infinity
+  # get the lowest non-infinite number (mean and sd)
+  min_mean <- min(mean_loo[!is.infinite(mean_loo)])
+  min_sd <- sd(out_log[,which(mean_loo==min_mean)])
+  out_log[,check_neg_inf] <- apply(out_log[,check_neg_inf,drop=FALSE],2,function(x) {
+      x <- log(runif(n=400,min=100*.Machine$double.neg.eps,max=200*.Machine$double.neg.eps))
+    return(x)
+  })
+
+  out_loo <- loo(out_log)
+  print(out_loo)
+  return(out_loo)
+})
+
+# Next compare LOOs between models
+
+compare_loos <- lapply(all_loos,function(x) as.numeric(compare(this_loo,x))) %>% unlist %>% 
+  matrix(nrow = length(all_loos),ncol=2,byrow=TRUE) %>% as_data_frame
+names(compare_loos) <- c('ELPD','SE')
+compare_loos %<>% mutate(high_ci=ELPD + 1.96*SE,low_ci=ELPD - 1.96*SE,algos=names(algos))
+```
+
+```{r plot_loos}
+compare_loos %>% ggplot(aes(y=ELPD,x=reorder(algos,-ELPD))) + geom_errorbar(aes(ymin=low_ci,ymax=high_ci),width=0.2) + 
+  geom_point(colour='red',size=2) + theme_minimal() + ylab("Performance Decrease Compared to Full Model") + xlab("")
+
+```
+
+
+We see using PSIS-LOO that there is a statistically distinguishable difference between the top performing algorithm and the hierachical model. However, it is difficult to distinguish the low and medium-performing algorithms from each other using this metric as the PSIS-LOO estimates appear to be identical. However, in this situation we can also calculate the difference in PSIS-LOO by comparing these two algorithms against each other directly:
+
+```{r compare_loo}
+diff_loo <- compare(all_loos[[2]],all_loos[[3]])
+print(diff_loo)
+```
+
+This shows that the PSIS-LOO difference between the two is `r round(diff_loo[1],2)`, so the medium algorithm underperforms the low algorithm. However, with a standard error of `r round(diff_loo[2],2)`, the difference is not distinguishable from random noise.
+
+### Payment
+
+The actual amounts that algorithm providers are paid depends on the level of risk that the provider and customer are willing to assume. An algorithm provider could assume all risk and be paid in direct proportion to the algorithm's predictive performance, whether as a proportion of total profit produced or PSIS-LOO. In this case, the algorithm provider would get an amount of the \$1500 proportional to either profit or PSIS-LOO produced relative to the full hierarchical model (or null model, in case only a single algorithm is purchased). For our example, using the mean levels of profit produced from the models, we can figure out the payout amounts by normalizing the algorithms' contributions to sum to 1:
+
+```{r payout_profit}
+calc_amount <- plot_diff %>% bind_rows %>% gather(type,diff) %>% separate(type,into=c('type','suffix')) %>% mutate(algo_type=rep(paste0('Algo_',c('High','Medium','Low')),times=n()/3)) %>% spread(suffix,diff) %>% filter(type=='profit') %>% select(algo_type,mean) %>% mutate(mean_diff=1-DMwR::SoftMax(mean),normalized=mean_diff/sum(mean_diff),payout=1500*normalized) %>% arrange(normalized)
+print(calc_amount)
+```
+
+Using this metric, we would pay out \$`r round(calc_amount$payout[calc_amount$algo_type=='Algo_High'],0)` to the top algorithm, \$`r round(calc_amount$payout[calc_amount$algo_type=='Algo_Medium'],0)` to the medium algorithm, and \$`r round(calc_amount$payout[calc_amount$algo_type=='Algo_Low'],0)` to the weakest algorithm. This method of payment ensures that all of the algorithms receive at least some money. We can do a similar calculation using PSIS-LOO.
+
+```{r payout_loo}
+compare_loos %>% mutate(mean_diff=DMwR::SoftMax(ELPD),normalized=mean_diff/sum(mean_diff),payout=1500*normalized) %>% arrange(normalized) %>% select(algos,mean_diff,normalized,payout)
+
+```
+
+These payout amounts using PSIS-LOO are only slightly different. One difference, though, is that because we know the difference between the bottom two algorithms is not statistically distinguishable using this metric, we should pay them an equal amount.
+
+Paying algorithms in direct proportion to their predictive performance assumes that the algorithm provider is willing to assume all or most of the risk of payment. An alternative strategy would be to parition the \$1500 for algorithms based on their rankings, such as \$750 for first, \$500 for second and \$250 for third. This would ensure that the algorithm provider has a baseline for their own potential loss in producing the algorithm.
+
+Finally, it is also possible to reward higher-performing algorithms by giving them a share of the profit. This could be simply added to the fixed amount of the \$1500 budget or given only to the top-performing algorithm. This calculation is straightforward as it only involves adding to the fixed budget to make payouts.
+
+### Conclusion
+
+These methods demonstrate how to pay for algorithms based on their performance. I used two metrics, profit and PSIS-LOO, to show how to evaluate the contribution of each algorithm. The particular choice of metric depends on the use context and on what the algorithm provider is willing to be evaluated on. The advantage of using the profit metric is that it is very specific to this use case and can be translated into concrete units. The advantage of PSIS-LOO, on the other hand, is that it can apply to any kind of model using any kind of outcome, such as customer satisfaction, time saved on truck routes, or the success of healthcare interventions. Of course, specific metrics like profit could also be constructed for each of these other use cases.
+
+Furthermore, the use of Bayesian methods enables each metric to be evaluated along with uncertainty. This uncertainty is important to establish when differences between algorithms are due to actual performance differences or simply to random noise. Using confidence intervals around these estimates enables a fair comparison between algorithms.
